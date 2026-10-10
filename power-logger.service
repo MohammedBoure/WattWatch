@@ -1,0 +1,19 @@
+[Unit]
+Description=Intel RAPL Power Consumption Logger Daemon
+After=multi-user.target
+
+[Service]
+Type=simple
+User=root
+# Grant unprivileged read access to RAPL energy counter for CLI powertool
+ExecStartPre=-/bin/chmod 0444 /sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj
+ExecStart=/usr/bin/python3 /opt/power-tracker/power_logger.py
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
