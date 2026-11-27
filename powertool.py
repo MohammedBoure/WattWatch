@@ -9,10 +9,11 @@ Provides:
 
 import os
 import sys
+import glob
 import time
 import argparse
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 DEFAULT_ENERGY_PATH = "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj"
 DEFAULT_MAX_RANGE_PATH = "/sys/class/powercap/intel-rapl/intel-rapl:0/max_energy_range_uj"
@@ -70,6 +71,161 @@ def compute_watts(
     return (delta_uj / 1_000_000.0) / delta_seconds
 
 
+def _read_sysfs_str(path: str) -> Optional[str]:
+    """Read and strip a sysfs text file, returning None if unavailable."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _read_sysfs_int(path: str) -> Optional[int]:
+    """Read an integer from a sysfs file, returning None if unavailable."""
+    val = _read_sysfs_str(path)
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        return None
+
+
+def find_rapl_domain_by_name(
+    target_name: str, base_dir: str = "/sys/class/powercap"
+) -> Optional[Tuple[str, str]]:
+    """
+    Find a readable Intel RAPL domain directory matching target_name (e.g. 'psys').
+    Returns (energy_uj_path, max_energy_range_uj_path) or None.
+    """
+    for domain_dir in sorted(glob.glob(os.path.join(base_dir, "intel-rapl*"))):
+        name = _read_sysfs_str(os.path.join(domain_dir, "name"))
+        if name == target_name:
+            energy_file = os.path.join(domain_dir, "energy_uj")
+            max_file = os.path.join(domain_dir, "max_energy_range_uj")
+            if os.access(energy_file, os.R_OK):
+                return energy_file, max_file
+    return None
+
+
+def read_power_supply_info(
+    power_supply_dir: str = "/sys/class/power_supply",
+) -> Dict[str, Any]:
+    """
+    Inspect /sys/class/power_supply for Mains (AC) and Battery (BAT*) metrics.
+    Computes battery wattage from power_now (uW) or current_now (uA) * voltage_now (uV).
+    """
+    info: Dict[str, Any] = {
+        "ac_online": None,
+        "ac_power_watts": None,
+        "battery_name": None,
+        "battery_status": None,
+        "battery_watts": None,
+        "battery_capacity": None,
+    }
+
+    if not os.path.isdir(power_supply_dir):
+        return info
+
+    for entry in sorted(os.listdir(power_supply_dir)):
+        dev_dir = os.path.join(power_supply_dir, entry)
+        if not os.path.isdir(dev_dir):
+            continue
+
+        supply_type = _read_sysfs_str(os.path.join(dev_dir, "type"))
+        if supply_type == "Mains":
+            online = _read_sysfs_int(os.path.join(dev_dir, "online"))
+            if online is not None:
+                info["ac_online"] = bool(online)
+            ac_power_uw = _read_sysfs_int(os.path.join(dev_dir, "power_now"))
+            if ac_power_uw is not None and ac_power_uw > 0:
+                info["ac_power_watts"] = ac_power_uw / 1_000_000.0
+
+        elif supply_type == "Battery" and info["battery_name"] is None:
+            present = _read_sysfs_int(os.path.join(dev_dir, "present"))
+            if present == 0:
+                continue
+
+            info["battery_name"] = entry
+            info["battery_status"] = _read_sysfs_str(os.path.join(dev_dir, "status"))
+            info["battery_capacity"] = _read_sysfs_int(os.path.join(dev_dir, "capacity"))
+
+            power_uw = _read_sysfs_int(os.path.join(dev_dir, "power_now"))
+            if power_uw is not None:
+                info["battery_watts"] = abs(power_uw) / 1_000_000.0
+            else:
+                current_ua = _read_sysfs_int(os.path.join(dev_dir, "current_now"))
+                voltage_uv = _read_sysfs_int(os.path.join(dev_dir, "voltage_now"))
+                if current_ua is not None and voltage_uv is not None:
+                    info["battery_watts"] = (
+                        abs(current_ua) * abs(voltage_uv)
+                    ) / 1_000_000_000_000.0
+
+    return info
+
+
+def resolve_device_power(
+    cpu_watts: float,
+    ps_info: Dict[str, Any],
+    psys_watts: Optional[float] = None,
+) -> Tuple[Optional[float], str]:
+    """
+    Determine total device power consumption (Watts) and a concise source label.
+    Priority:
+      1. Battery discharging power (actual full-device draw on battery)
+      2. Mains/AC power_now (if exposed by hardware)
+      3. Intel RAPL 'psys' domain (SoC/platform power, if exposed)
+    Returns (total_watts_or_None, status_label).
+    """
+    bat_status = ps_info.get("battery_status")
+    bat_watts = ps_info.get("battery_watts")
+    bat_name = ps_info.get("battery_name") or "BAT"
+    bat_cap = ps_info.get("battery_capacity")
+
+    if bat_status == "Discharging" and bat_watts is not None:
+        cap_str = f" {bat_cap}%" if bat_cap is not None else ""
+        return bat_watts, f"{bat_name}{cap_str}"
+
+    if ps_info.get("ac_power_watts") is not None:
+        return ps_info["ac_power_watts"], "AC"
+
+    if psys_watts is not None:
+        return psys_watts, "psys"
+
+    if ps_info.get("ac_online") or bat_status in ("Charging", "Full", "Not charging"):
+        detail_parts = ["On AC"]
+        if bat_status == "Charging" and bat_watts is not None:
+            detail_parts.append(f"Charging {bat_watts:.2f}W")
+        elif bat_status:
+            detail_parts.append(bat_status)
+        if bat_cap is not None:
+            detail_parts.append(f"{bat_cap}%")
+        return None, ", ".join(detail_parts)
+
+    return None, "No full-device sensor"
+
+
+def format_live_status_line(
+    cpu_watts: float,
+    total_watts: Optional[float],
+    source_label: str,
+    now_str: str,
+    sample_count: int,
+) -> str:
+    """Format the single-line (\\r) live monitor output."""
+    if total_watts is not None:
+        other_watts = max(0.0, total_watts - cpu_watts)
+        return (
+            f"\r[Live] Device Total: {total_watts:6.2f} W "
+            f"(CPU: {cpu_watts:5.2f} W | Other: {other_watts:5.2f} W) "
+            f"[{source_label}] | {now_str} | #{sample_count}  "
+        )
+    return (
+        f"\r[Live] Device Total: N/A ({source_label}) | "
+        f"CPU: {cpu_watts:5.2f} W | {now_str} | #{sample_count}  "
+    )
+
+
 # ============================================================================
 # Feature 1: Live Real-Time Power Draw Monitoring
 # ============================================================================
@@ -78,21 +234,45 @@ def run_live_view(
     energy_path: str = DEFAULT_ENERGY_PATH,
     max_range_path: str = DEFAULT_MAX_RANGE_PATH,
     interval: float = 1.0,
+    power_supply_dir: str = "/sys/class/power_supply",
 ):
     """
-    Stream live real-time power draw updates cleanly on a single line (\r).
+    Stream live real-time full-device and CPU power draw updates on a single line (\\r).
     Exits gracefully on Ctrl+C.
     """
-    print("\n" + "=" * 62)
-    print("      WattWatch: Live Intel RAPL Power Draw Monitor")
-    print("=" * 62)
-    print(f"Sampling interface : {energy_path}")
+    psys_paths = find_rapl_domain_by_name("psys")
+    initial_ps = read_power_supply_info(power_supply_dir)
+
+    print("\n" + "=" * 68)
+    print("      WattWatch: Live Full-Device & CPU Power Monitor")
+    print("=" * 68)
+    print(f"CPU RAPL interface : {energy_path}")
+    if initial_ps["battery_name"]:
+        print(
+            f"Power Supply       : {initial_ps['battery_name']} "
+            f"({initial_ps['battery_status'] or 'Unknown'})"
+        )
+    if psys_paths:
+        print(f"Platform RAPL      : {psys_paths[0]} (psys)")
+    if (
+        initial_ps.get("ac_online")
+        and initial_ps.get("ac_power_watts") is None
+        and not psys_paths
+    ):
+        print(
+            "Note               : On AC without wall-power/psys sensor; "
+            "unplug AC to measure full-device battery draw."
+        )
     print(f"Refresh interval   : {interval:.1f} second(s)")
     print("Streaming live power draw below. Press Ctrl+C to stop.\n")
 
     try:
         max_range_uj = read_max_energy_range_uj(max_range_path)
         last_uj = read_energy_uj(energy_path)
+        last_psys_uj = read_energy_uj(psys_paths[0]) if psys_paths else None
+        psys_max_range = (
+            read_max_energy_range_uj(psys_paths[1]) if psys_paths else None
+        )
         last_time = time.time()
     except Exception as e:
         print(f"\n[Error] Unable to initialize live monitoring: {e}", file=sys.stderr)
@@ -103,22 +283,41 @@ def run_live_view(
         while True:
             time.sleep(interval)
             curr_uj = read_energy_uj(energy_path)
+            curr_psys_uj = read_energy_uj(psys_paths[0]) if psys_paths else None
             curr_time = time.time()
             delta_seconds = curr_time - last_time
 
-            watts = compute_watts(curr_uj, last_uj, delta_seconds, max_range_uj)
+            cpu_watts = compute_watts(curr_uj, last_uj, delta_seconds, max_range_uj)
+            psys_watts = None
+            if (
+                psys_paths
+                and curr_psys_uj is not None
+                and last_psys_uj is not None
+                and psys_max_range is not None
+            ):
+                psys_watts = compute_watts(
+                    curr_psys_uj, last_psys_uj, delta_seconds, psys_max_range
+                )
+
+            ps_info = read_power_supply_info(power_supply_dir)
+            total_watts, source_label = resolve_device_power(
+                cpu_watts=cpu_watts, ps_info=ps_info, psys_watts=psys_watts
+            )
+
             sample_count += 1
             now_str = datetime.now().strftime("%H:%M:%S")
-
-            # Stream cleanly on single line using \r
-            status_line = (
-                f"\r[Live Monitor] Power Draw: {watts:6.2f} W  |  "
-                f"Time: {now_str}  |  Samples: {sample_count}  (Ctrl+C to exit)"
+            status_line = format_live_status_line(
+                cpu_watts=cpu_watts,
+                total_watts=total_watts,
+                source_label=source_label,
+                now_str=now_str,
+                sample_count=sample_count,
             )
             sys.stdout.write(status_line)
             sys.stdout.flush()
 
             last_uj = curr_uj
+            last_psys_uj = curr_psys_uj
             last_time = curr_time
 
     except KeyboardInterrupt:

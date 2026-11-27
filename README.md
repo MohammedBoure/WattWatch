@@ -11,7 +11,7 @@ This directory contains the source code, service definitions, automated installa
 | File | Purpose |
 | :--- | :--- |
 | `power_logger.py` | Daemon script sampling Intel RAPL `energy_uj` at regular intervals (every 2.0 seconds), handling counter wrap-around/overflow, and appending real-time power metrics (`YYYY-MM-DD HH:MM:SS,power_watts`) to `/var/log/power_history.csv`. |
-| `powertool.py` | Interactive CLI application providing real-time single-line wattage streaming (`\r`) and historical range queries (Average Watts, total Joules, total kWh, and duration) across logged timestamps. |
+| `powertool.py` | Interactive CLI application providing real-time single-line (`\r`) full-device & CPU wattage streaming (using `/sys/class/power_supply` battery/AC metrics, Intel RAPL `psys` when available, and `package-0`) and historical range queries (Average Watts, total Joules, total kWh, and duration) across logged timestamps. |
 | `powertool` | Executable symlink to `powertool.py` enabling direct invocation in the terminal. |
 | `power-logger.service` | Systemd service unit configuring `power_logger.py` as an automated background daemon with `Restart=always` and automatic restart delays. |
 | `install.sh` | Deployment script installing the daemon into `/opt/power-tracker/`, registering `/usr/local/bin/powertool`, enabling sysfs permissions via `tmpfiles.d`, and activating the systemd service. |

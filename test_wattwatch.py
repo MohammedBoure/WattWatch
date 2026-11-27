@@ -128,6 +128,78 @@ class TestHistoricalMetrics(unittest.TestCase):
                 os.remove(temp_path)
 
 
+class TestFullDevicePower(unittest.TestCase):
+    """Test full-device power discovery, calculation, and formatting."""
+
+    def _write_file(self, directory: str, name: str, content: str):
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def test_battery_discharging_via_current_and_voltage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bat_dir = os.path.join(tmpdir, "BAT1")
+            os.makedirs(bat_dir)
+            self._write_file(bat_dir, "type", "Battery\n")
+            self._write_file(bat_dir, "present", "1\n")
+            self._write_file(bat_dir, "status", "Discharging\n")
+            self._write_file(bat_dir, "current_now", "2000000\n")  # 2.0 A
+            self._write_file(bat_dir, "voltage_now", "12000000\n")  # 12.0 V
+            self._write_file(bat_dir, "capacity", "75\n")
+
+            info = powertool.read_power_supply_info(tmpdir)
+            self.assertEqual(info["battery_status"], "Discharging")
+            self.assertAlmostEqual(info["battery_watts"], 24.0, places=3)
+
+            total_watts, label = powertool.resolve_device_power(8.5, info)
+            self.assertAlmostEqual(total_watts, 24.0, places=3)
+            self.assertEqual(label, "BAT1 75%")
+
+            line = powertool.format_live_status_line(8.5, total_watts, label, "10:00:00", 1)
+            self.assertIn("Device Total:  24.00 W", line)
+            self.assertIn("CPU:  8.50 W", line)
+            self.assertIn("Other: 15.50 W", line)
+
+    def test_battery_discharging_via_power_now(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bat_dir = os.path.join(tmpdir, "BAT0")
+            os.makedirs(bat_dir)
+            self._write_file(bat_dir, "type", "Battery\n")
+            self._write_file(bat_dir, "present", "1\n")
+            self._write_file(bat_dir, "status", "Discharging\n")
+            self._write_file(bat_dir, "power_now", "18500000\n")  # 18.5 W
+
+            info = powertool.read_power_supply_info(tmpdir)
+            self.assertAlmostEqual(info["battery_watts"], 18.5, places=3)
+            total_watts, _ = powertool.resolve_device_power(5.0, info)
+            self.assertAlmostEqual(total_watts, 18.5, places=3)
+
+    def test_ac_charging_does_not_report_charge_rate_as_device_draw(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ac_dir = os.path.join(tmpdir, "ACAD")
+            bat_dir = os.path.join(tmpdir, "BAT1")
+            os.makedirs(ac_dir)
+            os.makedirs(bat_dir)
+            self._write_file(ac_dir, "type", "Mains\n")
+            self._write_file(ac_dir, "online", "1\n")
+            self._write_file(bat_dir, "type", "Battery\n")
+            self._write_file(bat_dir, "present", "1\n")
+            self._write_file(bat_dir, "status", "Charging\n")
+            self._write_file(bat_dir, "current_now", "2000000\n")
+            self._write_file(bat_dir, "voltage_now", "12000000\n")
+            self._write_file(bat_dir, "capacity", "80\n")
+
+            info = powertool.read_power_supply_info(tmpdir)
+            total_watts, label = powertool.resolve_device_power(6.0, info, psys_watts=None)
+            self.assertIsNone(total_watts)
+            self.assertIn("On AC", label)
+            self.assertIn("Charging 24.00W", label)
+
+            # If psys is available on AC, it should be used as total device power
+            total_psys, psys_label = powertool.resolve_device_power(6.0, info, psys_watts=21.25)
+            self.assertAlmostEqual(total_psys, 21.25, places=3)
+            self.assertEqual(psys_label, "psys")
+
+
 class TestHardwareInterface(unittest.TestCase):
     """Verify live hardware reading on the current host."""
 
