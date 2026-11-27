@@ -20,6 +20,7 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TLP_CONF_SRC="${SCRIPT_DIR}/01-asus-k95vj.conf"
 TLP_CONF_DST="/etc/tlp.d/01-asus-k95vj.conf"
 NOUVEAU_MODPROBE_DST="/etc/modprobe.d/99-asus-k95vj-nouveau-runpm.conf"
+GRUB_DROPIN_DST="/etc/default/grub.d/99-asus-k95vj-power.cfg"
 POWERTOOL_LINK="/usr/local/bin/powertool"
 
 require_root() {
@@ -58,12 +59,20 @@ apply_tuning() {
     cp "${TLP_CONF_SRC}" "${TLP_CONF_DST}"
     chmod 644 "${TLP_CONF_DST}"
 
-    echo "=== [3/5] Allowing Nouveau runtime PM (honors TLP AC=on / BAT=auto) ==="
+    echo "=== [3/5] Allowing Nouveau runtime PM & disabling phantom VGA-2 output ==="
     cat << 'EOF' > "${NOUVEAU_MODPROBE_DST}"
 # Enable nouveau runtime PM capability; TLP controls AC (on/active) vs Battery (auto/suspend)
 options nouveau runpm=1
 EOF
     chmod 644 "${NOUVEAU_MODPROBE_DST}"
+
+    mkdir -p /etc/default/grub.d
+    cat << 'EOF' > "${GRUB_DROPIN_DST}"
+# Disable phantom VGA-2 load-detect on GT 635M so nouveau can enter DynOff on battery
+GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT} video=VGA-2:d"
+EOF
+    chmod 644 "${GRUB_DROPIN_DST}"
+    update-grub >/dev/null 2>&1 || true
 
     echo "=== [4/5] Enabling TLP and keeping thermald active ==="
     systemctl enable --now tlp.service
@@ -89,7 +98,8 @@ revert_tuning() {
     require_root "$@"
 
     echo "=== Reverting ASUS K95VJ Power Tuning ==="
-    rm -f "${TLP_CONF_DST}" "${NOUVEAU_MODPROBE_DST}"
+    rm -f "${TLP_CONF_DST}" "${NOUVEAU_MODPROBE_DST}" "${GRUB_DROPIN_DST}"
+    update-grub >/dev/null 2>&1 || true
     systemctl disable --now tlp.service 2>/dev/null || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y power-profiles-daemon
     systemctl enable --now power-profiles-daemon.service 2>/dev/null || true
