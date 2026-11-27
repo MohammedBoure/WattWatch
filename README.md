@@ -16,6 +16,7 @@ This directory contains the source code, service definitions, automated installa
 | `power-logger.service` | Systemd service unit configuring `power_logger.py` as an automated background daemon with `Restart=always` and automatic restart delays. |
 | `install.sh` | Deployment script installing the daemon into `/opt/power-tracker/`, registering `/usr/local/bin/powertool`, enabling sysfs permissions via `tmpfiles.d`, and activating the systemd service. |
 | `test_wattwatch.py` | Comprehensive unit and integration test suite covering counter overflow calculations, CSV log parsing, metric formulas, and hardware sysfs readability. |
+| `power-config/` | Hardware-tailored TLP battery-only power tuning profile (`01-asus-k95vj.conf`) and reversible deployment script (`apply_power_tuning.sh`) keeping 100% full performance on AC. |
 | `.gitignore` | Git ignore rules excluding Python bytecode caches (`__pycache__`). |
 | `README.md` | Directory documentation explaining file roles, architectural details, and operational instructions. |
 
